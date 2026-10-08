@@ -846,6 +846,31 @@ class MainWindow(QtWidgets.QMainWindow):
         sc.setContext(Qt.WidgetWithChildrenShortcut)
         sc.activated.connect(self.on_delete_selected)
 
+        # ---- 纯显示类参数：改动后自动重绘（防抖）----
+        # 这些参数不影响信号处理本身，但改完若不点「绘制 / 刷新」不会生效，
+        # 容易误判为"参数没起效 / 横轴与实际不一致"。
+        # 一次完整重绘需重算 FFT/PSD（实测约 0.7~0.9 s），故用 400 ms 防抖：
+        # 操作停止后才绘制一次，避免拖拽数值框时连续重绘造成卡顿。
+        self._redraw_timer = QtCore.QTimer(self)
+        self._redraw_timer.setSingleShot(True)
+        self._redraw_timer.setInterval(400)
+        self._redraw_timer.timeout.connect(self._auto_redraw)
+        for wdg in (self.spin_t0, self.spin_tspan, self.spin_fmax,
+                    self.spin_ylim, self.chk_logx):
+            sig = getattr(wdg, "valueChanged", None) or wdg.stateChanged
+            sig.connect(self._schedule_redraw)
+
+    def _schedule_redraw(self, *_):
+        """纯显示参数变更后，延迟触发一次重绘（防抖）。"""
+        timer = getattr(self, "_redraw_timer", None)
+        if timer is not None:
+            timer.start()
+
+    def _auto_redraw(self):
+        """防抖到期后执行重绘。未导入文件时不做任何事，避免刷出无谓提示。"""
+        if self.signals:
+            self.plot_all()
+
     # ---------------- 导入 ----------------
 
     def on_import_files(self):
@@ -1543,8 +1568,19 @@ class MainWindow(QtWidgets.QMainWindow):
                       f"{sum(1 for k, _s, _c in self._all_ch_keys() if self._window_for(k) == 0)} 条"
                       f" / 下窗口 "
                       f"{sum(1 for k, _s, _c in self._all_ch_keys() if self._window_for(k) == 1)} 条）"
-                      f" · {self._t('归一化')}={self._norm_text()}"
-                      + (f" · 处理链={self._pp_label()}" if pp_on else ""))
+                      f" · {self._t('归一化')}={self._norm_text()}")
+            if pp_on:
+                ok_msg += f" · {self._t('处理链')}={self._pp_label()}"
+                n_pp = self.spin_pp_num.value()
+                if n_pp > 0:
+                    # 处理链只作用于前 Num 个点：时域"显示全程"也只覆盖这一段，
+                    # 这里如实标出，避免误判为横轴与数据长度不一致。
+                    ok_msg += self._t("（仅前 {n} 点）").format(n=n_pp)
+            # 如实报出时域实际显示的时间范围，便于确认「时域起点 / 时域时长」是否生效
+            if t_rng[0]:
+                t_lo = min(a for a, _b in t_rng[0])
+                t_hi = max(b for _a, b in t_rng[0])
+                ok_msg += f" · {self._t('时域')} {t_lo:.4g}~{t_hi:.4g} s"
             warn = self._unit_mismatch_msg(files)
             if warn and norm_mode == "none":
                 warn += "（可开启归一化解决重叠）"
