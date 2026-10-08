@@ -39,7 +39,7 @@ ENTRY = os.path.join(HERE, "app.py")
 
 # 写入 exe 属性（右键 → 属性 → 详细信息）的软件信息
 APP_TITLE = "VibSpec 振动信号分析器"
-APP_VERSION = (1, 1, 0, 0)
+APP_VERSION = (1, 1, 1, 0)
 APP_AUTHOR = "yang"
 APP_HOMEPAGE = ""     # 如有项目主页 / GitHub 地址，填入此处即可一并写入 exe 属性
 

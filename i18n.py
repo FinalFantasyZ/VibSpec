@@ -27,7 +27,7 @@ PROJECT_AUTHOR = "yang"
 APP_TITLE = "VibSpec"
 APP_TITLE_ZH = "VibSpec —— 振动信号分析器"
 APP_TITLE_EN = "VibSpec — Vibration Signal Analyzer"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 
 # ---------------------------------------------------------------------------
@@ -199,16 +199,16 @@ ZH2EN: Dict[str, str] = {
     "参数": "Parameters",
     "采样率 fs": "Sample rate fs",
     "采样率 fs（Hz）。时间轴换算关系为：时间 = 点数 / fs。\n"
-    "• 软件 CSV / 黑盒 MAT：自动读取文件记录的真实值；黑盒文件在采样率\n"
-    "   自洽（偏差 ≤1%）时锁定，偏差较大时自动解锁，便于手动标定；\n"
-    "• 示波器 MAT：文件里不含该字段，默认 20000 只是占位，需人工确认。\n"
+    "• 带采样率元数据的 CSV / MAT：直接读取文件记录的真实值；\n"
+    "   记录值与配置值偏差 ≤1% 时锁定，偏差较大时自动解锁，便于手动标定；\n"
+    "• 不含采样率字段的 MAT：默认 20000 仅为占位，需人工确认。\n"
     "注意：修改前需先在左侧列表选中目标文件（Ctrl/Shift 可多选），\n"
     "   只会改选中的文件，不会影响其它文件。":
         "Sample rate fs (Hz). Time axis: time = samples / fs.\n"
-        "• Software CSV / black-box MAT: the recorded true value is read automatically; "
-        "a black-box file stays locked while self-consistent (deviation ≤1%) and unlocks "
-        "automatically otherwise, so you can calibrate it manually;\n"
-        "• Oscilloscope MAT: the field is absent, 20000 is only a placeholder and must be "
+        "• CSV / MAT carrying a sample-rate field: the recorded value is read directly; "
+        "it stays locked while within 1% of the configured value and unlocks otherwise, "
+        "so you can calibrate it manually;\n"
+        "• MAT without a sample-rate field: 20000 is only a placeholder and must be "
         "confirmed by hand.\n"
         "Note: select the target file(s) in the list first (Ctrl/Shift for multiple); "
         "only the selection is changed.",
@@ -271,11 +271,11 @@ ZH2EN: Dict[str, str] = {
         "(e.g. -160) reveals weak components.",
     "去均值": "Remove DC",
     "做谱分析前先减去直流分量。\n"
-    "黑盒数据带 ~0.7 V 直流偏置，不去除会在 0 Hz 处产生极大的直流峰，\n"
+    "带直流偏置的信号（IEPE 类常约 0.7 V）若不去除，会在 0 Hz 处产生极大的直流峰，\n"
     "将有用的交流成分压制，因此默认勾选。":
         "Subtract the DC component before spectral analysis.\n"
-        "Black-box data carries ~0.7 V of DC bias; leaving it in creates a huge peak at "
-        "0 Hz that swamps the useful AC content, hence it is on by default.",
+        "A DC-biased signal (typically ~0.7 V for IEPE) would otherwise produce a huge "
+        "peak at 0 Hz that swamps the useful AC content, hence it is on by default.",
     "频率轴对数坐标": "Log frequency axis",
     "频域横轴改用对数刻度，便于同时看清低频细节和高频成分。":
         "Use a logarithmic frequency axis to see low-frequency detail and high-frequency "
@@ -361,10 +361,9 @@ ZH2EN: Dict[str, str] = {
     "版本": "Version",
     "项目主页：": "Homepage:  ",
     "振动信号分析器": "Vibration Signal Analyzer",
-    "本软件用于振动采样信号的时域与频域分析，支持软件 CSV、黑盒 MAT、"
-    "示波器 MAT 三种数据来源。":
-        "A desktop tool for time- and frequency-domain analysis of vibration records, "
-        "supporting software CSV, black-box MAT and oscilloscope MAT sources.",
+    "本软件用于振动采样信号的时域与频域分析，兼容 CSV 与 MATLAB MAT 两类数据文件。":
+        "A desktop tool for time- and frequency-domain analysis of vibration records. "
+        "It reads CSV and MATLAB MAT data files.",
 
     # ---- 图表 ----
     "时间 (s)": "Time (s)",
@@ -374,6 +373,9 @@ ZH2EN: Dict[str, str] = {
     "频域幅值谱（单边 FFT）": "Amplitude spectrum (one-sided FFT)",
     "功率谱密度 Welch PSD": "Power spectral density (Welch PSD)",
     "频域幅值谱": "Amplitude spectrum",
+    "CSV（表头格式）": "CSV (header)",
+    "MAT（含元数据）": "MAT (with metadata)",
+    "MAT（纯通道）": "MAT (channels only)",
     "（原始）": " (raw)",
     "包络up": "Env(up)",
     "时域": "Time",

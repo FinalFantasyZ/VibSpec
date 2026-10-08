@@ -231,7 +231,7 @@ P_D = os.path.join(TMP, "d.mat")
 make_mat(P_D, 10000.0, 40000)
 w._add_paths([P_C, P_D])
 qapp.processEvents()
-# 注意：示波器 MAT 文件里**没有** fs 字段，导入时一律是默认 20000 Hz。
+# 注意：纯通道 MAT 文件里**没有** fs 字段，导入时一律是默认 20000 Hz。
 # 真实场景即"人工确认真实采样率"这一步，此处如实模拟：
 # 把 d 改成 10000 Hz -> 40000 点变成 4.0 s，与 c 的 2.0 s 不同。
 w.signals[P_D].fs = 10000.0

@@ -4,21 +4,21 @@ loader.py —— 振动数据文件解析模块
 
 支持三种来源（格式依据实际采集文件确定）：
 
-1. 软件 CSV（VKDAQ System 导出，如 "外圈点蚀-1200.csv"）
+1. CSV（带表头的文本格式，如 "sample.csv"）
      第 1 行:  fs, fs, n_cols, ?, ?
      第 2 行:  ch0_ymax, ch1_ymax, ...      通道显示上限（V）
      第 3 行:  ch0_y0,   ch1_y0,   ...      通道基线显示值
      其后为数据行，逗号分隔。
      注意：数据区的第 1 行（全 0）与第 2 行是导出器写入的哨兵行，须予以剔除。
 
-2. 黑盒 MAT（采集仪保存，如 "外圈1200横.mat" / "BPFI1500h.mat"，MATLAB v5 格式）
+2. MAT（含采集参数元数据，如 "record.mat"，MATLAB v5 格式）
      关键变量 signal (1xN float64) 或 CH01 (Nx1 single)，单位为 V。
      变量名随导出 schema 变化：schema<=2 为 signal，schema>=3 改为 CH01
-     （与示波器 CHxx 同形，便于 MATLAB 侧统一 plot），本模块两者都识别。
+     （与纯通道 MAT 的 CHxx 同形，便于 MATLAB 侧统一 plot），本模块两者都识别。
      capture_fs / capture_effective_fs 给采样率；
      rpm / fault_type_cn / severity_cn / label_cn 给工况与标签。
 
-3. 示波器 MAT（如 "2026.09.21_0000.MAT"，MATLAB v5 格式，DL950 平台）
+3. MAT（仅含通道变量，如 "scope.mat"，MATLAB v5 格式）
      变量 CH03 / CH04，各 (N x 1) float32，单位 V。
      文件内不含采样率字段，需界面上手动指定（默认 20000 Hz）。
 """
@@ -72,12 +72,12 @@ class SignalSet:
 # 格式判别常量
 # ----------------------------------------------------------------------------
 
-# 示波器通道变量名模式（DL950 等导出 CH01/CH03/CH04 …）
+# 通道变量名模式（CH01 / CH03 / CH04 …）
 _SCOPE_CH = re.compile(r"^CH\d+$", re.IGNORECASE)
 
-# 黑盒导出的专属元数据字段：任一存在即判定为黑盒 MAT。
-# 说明：schema<=2 的黑盒波形变量名为 signal；schema>=3 起改为 CH01，
-# 与示波器通道同名，因此类型判别不能再依赖波形变量名，改以这些元数据字段为准。
+# 含元数据 MAT 的专属字段：任一存在即按「含元数据」解析。
+# 说明：schema<=2 的波形变量名为 signal；schema>=3 起改为 CH01，
+# 与纯通道 MAT 的通道同名，因此类型判别不能再依赖波形变量名，改以这些元数据字段为准。
 _BLACKBOX_MARKERS = (
     "capture_effective_fs",
     "capture_fs",
@@ -87,7 +87,7 @@ _BLACKBOX_MARKERS = (
     "signal",                       # 旧 schema 的波形变量名，保留兼容
 )
 
-# 黑盒波形变量候选名（按优先级）。
+# 波形变量候选名（按优先级）。
 _BLACKBOX_SIGNAL_VARS = ("signal", "CH01", "CH1")
 
 # 采样率字段的取值顺序：有效采样率对应波形实际所在的时间网格，优先采用。
@@ -105,14 +105,14 @@ _FS_SOURCE_LABEL = {
 # ----------------------------------------------------------------------------
 
 def load_software_csv(path: str, fs_override: Optional[float] = None) -> SignalSet:
-    """解析 VKDAQ System 导出的 CSV。"""
+    """解析带表头的 CSV。"""
     with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
         lines = fh.read().splitlines()
 
     # 剔除空行
     lines = [ln for ln in lines if ln.strip()]
     if len(lines) < 4:
-        raise ValueError("CSV 行数不足，无法解析为 VKDAQ 导出格式")
+        raise ValueError("CSV 行数不足，无法按表头格式解析")
 
     def parse_num_line(ln: str) -> List[float]:
         out = []
@@ -210,11 +210,11 @@ def load_software_csv(path: str, fs_override: Optional[float] = None) -> SignalS
 
 
 # ----------------------------------------------------------------------------
-# 2. 黑盒 MAT
+# 2. MAT（含元数据）
 # ----------------------------------------------------------------------------
 
 def _pick_blackbox_waveform(mat: Dict[str, np.ndarray]) -> Tuple[np.ndarray, str]:
-    """取出黑盒 MAT 的主波形，返回 ``(一维数组, 变量名)``。
+    """取出 MAT 的主波形，返回 ``(一维数组, 变量名)``。
 
     变量名随导出 schema 变化：schema<=2 为 ``signal``(1xN float64)，
     schema>=3 为 ``CH01``(Nx1 single)。两者语义相同，取值后统一拉平为一维。
@@ -231,12 +231,12 @@ def _pick_blackbox_waveform(mat: Dict[str, np.ndarray]) -> Tuple[np.ndarray, str
         if arr.size:
             return arr, chans[0]
     raise ValueError(
-        "黑盒 MAT 中未找到波形变量（候选名：signal / CH01）"
+        "MAT 中未找到波形变量（候选名：signal / CH01）"
     )
 
 
 def load_blackbox_mat(path: str, fs_override: Optional[float] = None) -> SignalSet:
-    """解析采集仪（黑盒）保存的 .mat。"""
+    """解析含采集参数元数据的 .mat。"""
     mat = sio.loadmat(path, squeeze_me=False)
 
     sig, sig_key = _pick_blackbox_waveform(mat)
@@ -330,11 +330,11 @@ def load_blackbox_mat(path: str, fs_override: Optional[float] = None) -> SignalS
 
 
 # ----------------------------------------------------------------------------
-# 3. 示波器 MAT
+# 3. MAT（纯通道）
 # ----------------------------------------------------------------------------
 
 def load_scope_mat(path: str, fs_override: Optional[float] = None) -> SignalSet:
-    """解析示波器（Yokogawa DL950 等）保存的 .mat。"""
+    """解析仅含通道变量的 .mat。"""
     mat = sio.loadmat(path, squeeze_me=False)
 
     chans: Dict[str, np.ndarray] = {}
@@ -345,7 +345,7 @@ def load_scope_mat(path: str, fs_override: Optional[float] = None) -> SignalSet:
             chans[key.upper()] = np.asarray(mat[key], dtype=np.float64).ravel()
 
     if not chans:
-        raise ValueError("示波器 MAT 中未找到 CHxx 通道变量")
+        raise ValueError("MAT 中未找到 CHxx 通道变量")
 
     # 文件内无采样率字段，默认 20000 Hz（与采集链路一致）
     fs = float(fs_override) if fs_override else 20000.0
@@ -373,12 +373,12 @@ def load_scope_mat(path: str, fs_override: Optional[float] = None) -> SignalSet:
 def sniff_type(path: str) -> str:
     """根据扩展名与文件内容判断来源类型。
 
-    黑盒与示波器同为 .mat，且黑盒 schema>=3 起主波形变量名也叫 ``CH01``，
+    两类 MAT 都以 .mat 保存，含元数据者在 schema>=3 起主波形变量名也叫 ``CH01``，
     因此不能再用波形变量名区分二者。判据顺序：
 
-    1. 含黑盒专属元数据字段（``capture_*`` / ``history_payload_json``）→ 黑盒；
-    2. 含旧 schema 的 ``signal`` 变量 → 黑盒；
-    3. 其余含 ``CHxx`` 变量的文件 → 示波器。
+    1. 含 ``capture_*`` / ``history_payload_json`` 元数据字段 → 含元数据；
+    2. 含旧 schema 的 ``signal`` 变量 → 含元数据；
+    3. 其余含 ``CHxx`` 变量的文件 → 纯通道。
     """
     ext = os.path.splitext(path)[1].lower()
     if ext == ".csv":

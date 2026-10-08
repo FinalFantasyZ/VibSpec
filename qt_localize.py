@@ -77,11 +77,13 @@ DIALOG_ZH: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 # 结构为 (按钮文字, 提示, 图标名, 回调方法名)，顺序必须与 matplotlib 一致
 # （基类 toolitems 再插入 Customize）。图标名与回调名不可翻译。
+#
+# 注意：这里**故意去掉了 Home / Back / Forward 三个按钮**。
+# VibSpec 每次绘图都会 fig.clear() 重建坐标轴，而 matplotlib 的导航历史
+# (NavigationToolbar2._nav_stack) 里保存的是重建前的坐标轴对象，
+# 因此这三个按钮点下去不会产生任何效果（已实测）。保留只会误导用户；
+# 缩放后如需复原，重新点「绘制 / 刷新」即可。
 TOOLITEMS_EN = (
-    ('Home', 'Reset original view', 'home', 'home'),
-    ('Back', 'Back to previous view', 'back', 'back'),
-    ('Forward', 'Forward to next view', 'forward', 'forward'),
-    (None, None, None, None),
     ('Pan', 'Left button pans, Right button zooms\n'
             'x/y fixes axis, CTRL fixes aspect', 'move', 'pan'),
     ('Zoom', 'Zoom to rectangle\nx/y fixes axis', 'zoom_to_rect', 'zoom'),
@@ -93,10 +95,6 @@ TOOLITEMS_EN = (
 )
 
 TOOLITEMS_ZH = (
-    ('主页', '恢复原始视图', 'home', 'home'),
-    ('后退', '后退到上一个视图', 'back', 'back'),
-    ('前进', '前进到下一个视图', 'forward', 'forward'),
-    (None, None, None, None),
     ('平移', '左键平移，右键缩放\nx/y 固定单轴，CTRL 固定纵横比', 'move', 'pan'),
     ('缩放', '缩放到矩形区域\nx/y 固定单轴', 'zoom_to_rect', 'zoom'),
     ('子图', '调整子图参数', 'subplots', 'configure_subplots'),
@@ -105,6 +103,35 @@ TOOLITEMS_ZH = (
     (None, None, None, None),
     ('保存', '保存当前图形', 'filesave', 'save_figure'),
 )
+
+# 需要从工具栏中剔除的失效按钮（按 tooltip 首行识别，兼容中英文两种状态）
+DEAD_TOOL_TIPS = {
+    "Reset original view", "Back to previous view", "Forward to next view",
+    "恢复原始视图", "后退到上一个视图", "前进到下一个视图",
+}
+
+
+def strip_dead_nav_buttons(root) -> int:
+    """移除工具栏中失效的 Home / Back / Forward 按钮。
+
+    这三个按钮在 VibSpec 中不起作用（坐标轴每次绘图都会重建，导航历史随之失效），
+    对**已创建**的工具栏也做一次清理。返回移除的按钮数。
+    """
+    try:
+        from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
+    except Exception:
+        return 0
+
+    removed = 0
+    for tb in root.findChildren(NavigationToolbar2QT):
+        for act in list(tb.actions()):
+            if act.isSeparator():
+                continue
+            tip = (act.toolTip() or "").split("\n")[0].strip()
+            if tip in DEAD_TOOL_TIPS:
+                tb.removeAction(act)
+                removed += 1
+    return removed
 
 
 def toolitems_for(lang: str):
@@ -149,11 +176,25 @@ def localize_dialog(dlg) -> int:
     changed = 0
 
     # 「?」是 QDialog 默认带入的上下文帮助按钮，matplotlib 并未实现其内容，
-    # 点击无反应，故显式关闭。setWindowFlag 不会隐藏已显示的窗口。
+    # 点击无反应，故显式关闭。
+    # 注意：setWindowFlag 会**隐藏已显示的窗口**，因此本函数应在对话框
+    # show() 之前调用（见 install() 中挂在 FormDialog.__init__ 上的做法）；
+    # 万一在显示后调用，这里负责把窗口重新显示出来，避免"闪一下就消失"。
+    was_visible = False
+    try:
+        was_visible = dlg.isVisible()
+    except Exception:
+        pass
     try:
         dlg.setWindowFlag(QtCore.Qt.WindowContextHelpButtonHint, False)
     except Exception:
         pass
+    if was_visible:
+        try:
+            if not dlg.isVisible():
+                dlg.show()
+        except Exception:
+            pass
 
     # 子图调整对话框未设置标题，会沿用应用名，这里补一个明确的中文标题
     try:
@@ -213,21 +254,21 @@ def install(lang: str = None):
     except Exception:
         pass
 
-    if getattr(_formlayout.fedit, "_vibspec_patched", False):
+    if getattr(_formlayout.FormDialog.__init__, "_vibspec_patched", False):
         return
 
-    orig_fedit = _formlayout.fedit
+    # 关键：图形参数对话框必须在 show() **之前**完成本地化。
+    # setWindowFlag 会隐藏已显示的窗口；若等 fedit() 返回后再改窗口标志，
+    # 用户看到的就是"点一下闪一下就消失"。因此这里挂在 FormDialog.__init__
+    # 上（fedit 内部的 dialog.show() 在其之后执行）。
+    orig_form_init = _formlayout.FormDialog.__init__
 
-    def fedit(*args, **kwargs):
-        orig_fedit(*args, **kwargs)
-        parent = kwargs.get("parent")
-        if parent is None and len(args) >= 5:
-            parent = args[4]
-        dlg = getattr(parent, "_fedit_dialog", None)
-        localize_dialog(dlg)
+    def form_init(self, *args, **kwargs):
+        orig_form_init(self, *args, **kwargs)
+        localize_dialog(self)
 
-    fedit._vibspec_patched = True
-    _formlayout.fedit = fedit
+    form_init._vibspec_patched = True
+    _formlayout.FormDialog.__init__ = form_init
 
     orig_init = SubplotToolQt.__init__
 

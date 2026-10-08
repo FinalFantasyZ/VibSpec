@@ -117,6 +117,8 @@ class MainWindow(QtWidgets.QMainWindow):
         qt_localize.install(self.lang)
 
         self._build_ui()
+        # 工具栏建好后，剔除在本工具中失效的导航按钮（Home / 后退 / 前进）
+        qt_localize.strip_dead_nav_buttons(self)
         self._connect()
         self._build_menubar()
         # 上次若选择的是英文，启动时把界面整体切过去
@@ -550,9 +552,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_fs.setSuffix(" Hz")
         self.spin_fs.setToolTip(
             "采样率 fs（Hz）。时间轴换算关系为：时间 = 点数 / fs。\n"
-            "• 软件 CSV / 黑盒 MAT：自动读取文件记录的真实值；黑盒文件在采样率\n"
-            "   自洽（偏差 ≤1%）时锁定，偏差较大时自动解锁，便于手动标定；\n"
-            "• 示波器 MAT：文件里不含该字段，默认 20000 只是占位，需人工确认。\n"
+            "• 带采样率元数据的 CSV / MAT：直接读取文件记录的真实值；\n"
+            "   记录值与配置值偏差 ≤1% 时锁定，偏差较大时自动解锁，便于手动标定；\n"
+            "• 不含采样率字段的 MAT：默认 20000 仅为占位，需人工确认。\n"
             "注意：修改前需先在左侧列表选中目标文件（Ctrl/Shift 可多选），\n"
             "   只会改选中的文件，不会影响其它文件。")
         gp.addRow("采样率 fs", self.spin_fs)
@@ -638,7 +640,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_detrend.setChecked(True)
         self.chk_detrend.setToolTip(
             "做谱分析前先减去直流分量。\n"
-            "黑盒数据带 ~0.7 V 直流偏置，不去除会在 0 Hz 处产生极大的直流峰，\n"
+            "带直流偏置的信号（IEPE 类常约 0.7 V）若不去除，会在 0 Hz 处产生极大的直流峰，\n"
             "将有用的交流成分压制，因此默认勾选。")
         gp.addRow(self.chk_detrend)
 
@@ -726,8 +728,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.menu_about = mb.addMenu(self._t("关于"))
         self.act_about = self.menu_about.addAction(self._t("关于 VibSpec"))
         self.act_about.triggered.connect(self.show_about)
-        self.act_home = self.menu_about.addAction(self._t("打开项目主页"))
-        self.act_home.triggered.connect(self.open_homepage)
 
         self.menu_lang = mb.addMenu(self._t("语言 / Language"))
         self.lang_actions = {}
@@ -764,7 +764,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # 菜单栏单独刷新
         self.menu_about.setTitle(self._t("关于"))
         self.act_about.setText(self._t("关于 VibSpec"))
-        self.act_home.setText(self._t("打开项目主页"))
         self.menu_lang.setTitle(self._t("语言 / Language"))
         for c, act in self.lang_actions.items():
             act.setChecked(c == code)
@@ -790,7 +789,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"<p>项目主页：<br>"
                 f"<a href='{i18n.PROJECT_HOMEPAGE}'>{i18n.PROJECT_HOMEPAGE}</a></p>"
                 f"<p>本软件用于振动采样信号的时域与频域分析，"
-                f"支持软件 CSV、黑盒 MAT、示波器 MAT 三种数据来源。</p>"
+                f"兼容 CSV 与 MATLAB MAT 两类数据文件。</p>"
             )
             ok_text = "确定"
         else:
@@ -802,8 +801,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"<p>Project homepage:<br>"
                 f"<a href='{i18n.PROJECT_HOMEPAGE}'>{i18n.PROJECT_HOMEPAGE}</a></p>"
                 f"<p>A desktop tool for time- and frequency-domain analysis of vibration "
-                f"records, supporting software CSV, black-box MAT and oscilloscope MAT "
-                f"sources.</p>"
+                f"records. It reads CSV and MATLAB MAT data files.</p>"
             )
             ok_text = "OK"
         box.setTextFormat(Qt.RichText)
@@ -812,9 +810,6 @@ class MainWindow(QtWidgets.QMainWindow):
         box.setStandardButtons(QtWidgets.QMessageBox.Ok)
         box.button(QtWidgets.QMessageBox.Ok).setText(ok_text)
         box.exec_()
-
-    def open_homepage(self):
-        QtGui.QDesktopServices.openUrl(QtCore.QUrl(i18n.PROJECT_HOMEPAGE))
 
     def _connect(self):
         self.btn_file.clicked.connect(self.on_import_files)
@@ -1034,7 +1029,11 @@ class MainWindow(QtWidgets.QMainWindow):
         s = self.signals.get(path)
         if not s:
             return
-        lines = [f"文件: {s.name}", f"类型: {s.source_type}",
+        type_label = self._t({"csv": "CSV（表头格式）",
+                              "blackbox_mat": "MAT（含元数据）",
+                              "scope_mat": "MAT（纯通道）"}.get(s.source_type,
+                                                                s.source_type))
+        lines = [f"文件: {s.name}", f"类型: {type_label}",
                  f"采样率: {s.fs:g} Hz", f"点数: {s.n_samples}",
                  f"时长: {s.duration:.4f} s", f"通道: {', '.join(s.channels)}"]
         if s.meta:
@@ -1172,8 +1171,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         问题背景（"时域时间轴偶发异常"的主要原因）：
         此前在**未选中任何文件**时，会将新采样率应用到**全部未锁定文件**。
-        示波器 MAT 的采样率默认处于未锁定状态，因此调整该数值框时，
-        所有示波器文件的采样率会被一并修改，时域横轴随之整体错位；
+        不含采样率字段的 MAT 默认处于未锁定状态，因此调整该数值框时，
+        这类文件的采样率会被一并修改，时域横轴随之整体错位；
         同时因当时修改后**未触发重绘**，需等待下一次操作才显现，表现为"偶发异常"。
         现改为：仅修改选中项；未选中时给出明确提示，不进行静默批量修改。
         """
@@ -1234,7 +1233,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """时域归一化。仅用于绘图显示，不改动原始数据。
 
         注意：全部模式都会**去均值**后再缩放。
-        原因是黑盒数据含约 0.7V 直流偏置，若仅作除法运算，曲线整体被抬至
+        原因是这类信号常含约 0.7 V 直流偏置，若仅作除法运算，曲线整体被抬至
         较高位置，波形被压缩成一条粗线，反而更难分辨。
         去均值使零点回到中线，是归一化显示的正确做法。
         （如需查看原始直流分量，请选择「不归一化」。）
@@ -1898,7 +1897,7 @@ def _selftest() -> int:
                 len(w.signals) == 0 and os.path.exists(p),
                 f"列表 {len(w.signals)} 个，磁盘文件仍在")
 
-            # 黑盒 MAT 判别回归：schema>=3 起波形变量名为 CH01，与示波器通道同名，
+            # MAT 格式判别回归：schema>=3 起波形变量名为 CH01，与纯通道 MAT 同名，
             # 类型判别必须依据 capture_* 元数据字段，且采样率取有效值而非默认 20000。
             bb_path = os.path.join(tmpd, "selftest_blackbox.mat")
             eff_fs, cfg_fs = 31039.0, 31580.0
@@ -1911,21 +1910,21 @@ def _selftest() -> int:
                 "signal_unit": "V",
             })
             bb_type = loader.sniff_type(bb_path)
-            rec("黑盒 MAT（变量 CH01）判别", bb_type == "blackbox_mat", bb_type)
+            rec("MAT（含元数据）格式判别", bb_type == "blackbox_mat", bb_type)
             bb = loader.load_any(bb_path)
-            rec("黑盒 MAT 采样率取有效值", abs(bb.fs - eff_fs) < 1e-6, f"fs={bb.fs:g}")
-            rec("黑盒 MAT 波形/工况解析",
+            rec("MAT 采样率取有效值", abs(bb.fs - eff_fs) < 1e-6, f"fs={bb.fs:g}")
+            rec("MAT 波形与工况解析",
                 "CH1" in bb.channels and bb.n_samples == N
                 and bb.meta.get("转速(rpm)") == "1480.0",
                 f"ch={list(bb.channels)} n={bb.n_samples}")
-            rec("黑盒 MAT 采样率偏差提示", any("1.71" in x for x in bb.warnings),
+            rec("MAT 采样率偏差提示", any("1.71" in x for x in bb.warnings),
                 f"{len(bb.warnings)} 条提示")
-            rec("黑盒 MAT 偏差>1% 时解除采样率锁定", bb.fs_locked is False,
+            rec("MAT 偏差>1% 时解除采样率锁定", bb.fs_locked is False,
                 f"fs_locked={bb.fs_locked}")
-            rec("示波器 MAT（变量 CH03）未被误判", loader.sniff_type(p) == "scope_mat",
+            rec("MAT（无元数据）未被误判", loader.sniff_type(p) == "scope_mat",
                 loader.sniff_type(p))
 
-            # 采样率自洽的黑盒文件应保持锁定，避免误改
+            # 采样率自洽的 MAT 文件应保持锁定，避免误改
             bb2_path = os.path.join(tmpd, "selftest_blackbox_ok.mat")
             savemat(bb2_path, {
                 "CH01": sig.reshape(-1, 1).astype("float32"),
@@ -1933,7 +1932,7 @@ def _selftest() -> int:
                 "capture_effective_fs": np.array([[25600.0]]),
             })
             bb2 = loader.load_any(bb2_path)
-            rec("黑盒 MAT 采样率自洽时保持锁定",
+            rec("MAT 采样率自洽时保持锁定",
                 bb2.fs_locked is True and abs(bb2.fs - 25600.0) < 1e-6,
                 f"fs={bb2.fs:g} locked={bb2.fs_locked}")
         except Exception as e:
