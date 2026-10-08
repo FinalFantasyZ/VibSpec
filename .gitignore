@@ -1,0 +1,25 @@
+# ---- 构建产物 ----
+build/
+dist/
+*.spec
+
+# ---- 虚拟环境 ----
+.venv/
+.venv-build/
+venv/
+
+# ---- Python 缓存 ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ---- 运行期日志 ----
+*.log
+
+# ---- 测试临时数据 ----
+_feat_data/
+_ui_chain_data/
+_pylib/
+
+# ---- 本地备份 ----
+_backup_*/
