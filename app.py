@@ -1534,6 +1534,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 fs_txt = ("  fs=" + " / ".join(format(v, "g") for v in fss) + " Hz"
                           if fss else "")
                 win_txt = self._t("上" if wi == 0 else "下")
+                # 本窗口实际可显示的数据跨度。若小于请求的「时域时长」，
+                # 说明该窗口的数据本身不够长（各窗口按自身数据取范围），
+                # 直接在标题里标出，避免误判为"时域时长只对一个窗口生效"。
+                span_avail = 0.0
+                if t_rng[wi]:
+                    span_avail = (max(b for _a, b in t_rng[wi])
+                                  - min(a for a, _b in t_rng[wi]))
+                req_span = self.spin_tspan.value()
+                short_note = ""
+                # 阈值取 90%：只有差距明显（例如 4.05 s 对 0.78 s）才标注，
+                # 像 4.0 s 对 4.05 s 这种 1% 级别的差别不打扰用户
+                if req_span and req_span > 0 and span_avail and \
+                        span_avail < req_span * 0.9:
+                    short_note = f"  · {self._t('数据仅')} {span_avail:.4g} s"
                 for kind, title in (("time", "时域波形"),
                                     ("freq", "频域幅值谱（单边 FFT）"),
                                     ("psd", "功率谱密度 Welch PSD")):
@@ -1541,8 +1555,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     head = (f"[{win_txt} window] {self._t(title)}"
                             if self.lang == i18n.LANG_EN
                             else f"[{win_txt}窗口] {self._t(title)}")
-                    ax.set_title(f"{head}{fs_txt if kind == 'time' else ''}",
-                                 fontsize=10)
+                    extra = fs_txt if kind == "time" else ""
+                    if kind == "time":
+                        extra += short_note
+                    ax.set_title(f"{head}{extra}", fontsize=10)
                     if kind != "time" and fmax_w:
                         if logx:
                             ax.set_xscale("log")
@@ -1576,11 +1592,18 @@ class MainWindow(QtWidgets.QMainWindow):
                     # 处理链只作用于前 Num 个点：时域"显示全程"也只覆盖这一段，
                     # 这里如实标出，避免误判为横轴与数据长度不一致。
                     ok_msg += self._t("（仅前 {n} 点）").format(n=n_pp)
-            # 如实报出时域实际显示的时间范围，便于确认「时域起点 / 时域时长」是否生效
-            if t_rng[0]:
-                t_lo = min(a for a, _b in t_rng[0])
-                t_hi = max(b for _a, b in t_rng[0])
-                ok_msg += f" · {self._t('时域')} {t_lo:.4g}~{t_hi:.4g} s"
+            # 分别报出两个窗口的时域实际范围。
+            # 各窗口按**自身实际绘制数据**的并集取范围：数据较短的窗口，
+            # 即便把「时域时长」调得更大，也只能显示到它的全长 ——
+            # 这正是"改了时域时长似乎只有一个窗口响应"的原因，因此在界面上直接讲明。
+            t_parts = []
+            for _wi, _name in ((0, "上"), (1, "下")):
+                if t_rng[_wi]:
+                    _lo = min(a for a, _b in t_rng[_wi])
+                    _hi = max(b for _a, b in t_rng[_wi])
+                    t_parts.append(f"{self._t(_name)} {_lo:.4g}~{_hi:.4g} s")
+            if t_parts:
+                ok_msg += f" · {self._t('时域')} " + " / ".join(t_parts)
             warn = self._unit_mismatch_msg(files)
             if warn and norm_mode == "none":
                 warn += "（可开启归一化解决重叠）"

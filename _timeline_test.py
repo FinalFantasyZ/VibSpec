@@ -106,6 +106,33 @@ def main():
     check("含时域实际范围", "时域" in msg and "~" in msg, msg[-70:])
     check("含处理链作用点数", "仅前" in msg, "（仅前 N 点）" if "仅前" in msg else msg[-70:])
 
+    print("== 5b. 两窗口数据长度不同：各自取范围 + 标题标注 ==")
+    # 造一个更短的第二个文件，放到下窗口
+    t2 = np.arange(N // 5) / FS                     # 只有 1/5 长
+    p2 = os.path.join(tmpd, "t_short.mat")
+    savemat(p2, {"CH1": sig[:N // 5].reshape(-1, 1).astype("float32"),
+                 "capture_fs": np.array([[FS]]),
+                 "capture_effective_fs": np.array([[FS]])})
+    w.chk_pp.setChecked(False)
+    w._add_paths([p2])
+    w._check_all(True)
+    for k in list(w.win_assign):
+        w.win_assign[k] = 1 if "t_short" in k else 0
+    w.spin_t0.setValue(0.0)
+    w.spin_tspan.setValue(1.5)                       # 远大于短文件
+    w.plot_all()
+    QTest.qWait(100)
+    up_ax = w.windows[0]["time"].ax
+    dn_ax = w.windows[1]["time"].ax
+    check("上窗口按请求取 1.5 s", abs((up_ax.get_xlim()[1] - up_ax.get_xlim()[0]) - 1.5) < 0.01,
+          f"{tuple(round(v,3) for v in up_ax.get_xlim())}")
+    check("下窗口退化为自身全长", dn_ax.get_xlim()[1] < 1.0,
+          f"{tuple(round(v,3) for v in dn_ax.get_xlim())}")
+    check("短窗口标题标出数据长度", "数据仅" in dn_ax.get_title(), dn_ax.get_title())
+    check("长窗口不误标", "数据仅" not in up_ax.get_title(), up_ax.get_title())
+    msg2 = w.statusBar().currentMessage()
+    check("状态栏分别报两个窗口", msg2.count("~") >= 2, msg2[-64:])
+
     print("== 6. 纯显示参数自动重绘 ==")
     w.spin_tspan.setValue(0.3)
     QTest.qWait(700)

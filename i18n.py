@@ -27,7 +27,7 @@ PROJECT_AUTHOR = "yang"
 APP_TITLE = "VibSpec"
 APP_TITLE_ZH = "VibSpec —— 振动信号分析器"
 APP_TITLE_EN = "VibSpec — Vibration Signal Analyzer"
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +377,7 @@ ZH2EN: Dict[str, str] = {
     "MAT（含元数据）": "MAT (with metadata)",
     "MAT（纯通道）": "MAT (channels only)",
     "（仅前 {n} 点）": " (first {n} points only)",
+    "数据仅": "data only",
     "（原始）": " (raw)",
     "包络up": "Env(up)",
     "时域": "Time",
