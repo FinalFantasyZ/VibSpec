@@ -12,9 +12,10 @@ loader.py —— 振动数据文件解析模块
      注意：数据区的第 1 行（全 0）与第 2 行是导出器写入的哨兵行，须予以剔除。
 
 2. MAT（含采集参数元数据，如 "record.mat"，MATLAB v5 格式）
-     关键变量 signal (1xN float64) 或 CH01 (Nx1 single)，单位为 V。
-     变量名随导出 schema 变化：schema<=2 为 signal，schema>=3 改为 CH01
-     （与纯通道 MAT 的 CHxx 同形，便于 MATLAB 侧统一 plot），本模块两者都识别。
+     关键变量 signal (1xN float64) 或 CH01 / CH02 … (Nx1 single)，单位为 V。
+     变量名随导出 schema 变化：schema<=2 为单通道 signal，schema>=3 改为
+     逐通道 CHxx（与纯通道 MAT 的 CHxx 同形，便于 MATLAB 侧统一 plot）。
+     schema>=3 的文件可能同时写入多个通道，本模块全部导入，不做取舍。
      capture_fs / capture_effective_fs 给采样率；
      rpm / fault_type_cn / severity_cn / label_cn 给工况与标签。
 
@@ -72,11 +73,11 @@ class SignalSet:
 # 格式判别常量
 # ----------------------------------------------------------------------------
 
-# 通道变量名模式（CH01 / CH03 / CH04 …）
-_SCOPE_CH = re.compile(r"^CH\d+$", re.IGNORECASE)
+# 通道变量名模式（CH01 / CH03 / CH4 …），捕获组为通道序号
+_SCOPE_CH = re.compile(r"^CH(\d+)$", re.IGNORECASE)
 
 # 含元数据 MAT 的专属字段：任一存在即按「含元数据」解析。
-# 说明：schema<=2 的波形变量名为 signal；schema>=3 起改为 CH01，
+# 说明：schema<=2 的波形变量名为 signal；schema>=3 起改为 CH01、CH02 …
 # 与纯通道 MAT 的通道同名，因此类型判别不能再依赖波形变量名，改以这些元数据字段为准。
 _BLACKBOX_MARKERS = (
     "capture_effective_fs",
@@ -87,16 +88,29 @@ _BLACKBOX_MARKERS = (
     "signal",                       # 旧 schema 的波形变量名，保留兼容
 )
 
-# 波形变量候选名（按优先级）。
-_BLACKBOX_SIGNAL_VARS = ("signal", "CH01", "CH1")
+# 旧 schema（<=2）的波形变量名。新 schema 用 CHxx，可含多个通道。
+_LEGACY_SIGNAL_VAR = "signal"
 
 # 采样率字段的取值顺序：有效采样率对应波形实际所在的时间网格，优先采用。
-_FS_FIELD_ORDER = ("capture_effective_fs", "capture_fs", "capture_sample_rate")
+# 后四项为不同导出版本的等价字段，仅在 capture_* 缺失时兜底。
+_FS_FIELD_ORDER = (
+    "capture_effective_fs",
+    "capture_fs",
+    "capture_sample_rate",
+    "effective_fs",
+    "sample_rate_hz",
+    "configured_fs",
+    "fs",
+)
 
 _FS_SOURCE_LABEL = {
     "capture_effective_fs": "有效采样率（实测）",
     "capture_fs": "配置采样率",
     "capture_sample_rate": "配置采样率",
+    "effective_fs": "有效采样率（实测）",
+    "sample_rate_hz": "文件记录采样率",
+    "configured_fs": "配置采样率",
+    "fs": "文件记录采样率",
 }
 
 
@@ -213,33 +227,96 @@ def load_software_csv(path: str, fs_override: Optional[float] = None) -> SignalS
 # 2. MAT（含元数据）
 # ----------------------------------------------------------------------------
 
-def _pick_blackbox_waveform(mat: Dict[str, np.ndarray]) -> Tuple[np.ndarray, str]:
-    """取出 MAT 的主波形，返回 ``(一维数组, 变量名)``。
+def _collect_scope_channels(mat: Dict[str, np.ndarray]
+                            ) -> Tuple[Dict[str, np.ndarray], List[str]]:
+    """收集 MAT 中所有 ``CHxx`` 变量，按通道序号升序返回 ``(通道字典, 提示)``。
 
-    变量名随导出 schema 变化：schema<=2 为 ``signal``(1xN float64)，
-    schema>=3 为 ``CH01``(Nx1 single)。两者语义相同，取值后统一拉平为一维。
+    通道名保留文件中的原始写法（``CH01`` / ``CH03`` …）：编号本身携带物理
+    接线信息，导出时可能只启用部分通道（例如只存在 ``CH02``），改写成
+    ``CH1`` 会掩盖这一点。同一编号出现多种写法（``CH1`` 与 ``CH01``）时，
+    保留文件中先出现的那个，并记录一条提示。
     """
-    for key in _BLACKBOX_SIGNAL_VARS:
-        if key in mat:
+    picked: Dict[int, Tuple[str, np.ndarray]] = {}
+    notes: List[str] = []
+    for key in mat:
+        if key.startswith("__"):
+            continue
+        m = _SCOPE_CH.match(key)
+        if not m:
+            continue
+        try:
             arr = np.asarray(mat[key], dtype=np.float64).ravel()
-            if arr.size:
-                return arr, key
-    # 回退：文件中仅有一个 CHxx 变量时，视为波形通道
-    chans = [k for k in mat if _SCOPE_CH.match(k)]
-    if len(chans) == 1:
-        arr = np.asarray(mat[chans[0]], dtype=np.float64).ravel()
-        if arr.size:
-            return arr, chans[0]
-    raise ValueError(
-        "MAT 中未找到波形变量（候选名：signal / CH01）"
-    )
+        except (TypeError, ValueError):
+            notes.append(f"变量 {key} 不是数值数组，已跳过")
+            continue
+        if arr.size == 0:
+            notes.append(f"变量 {key} 为空，已跳过")
+            continue
+        idx = int(m.group(1))
+        if idx in picked:
+            notes.append(f"变量 {key} 与 {picked[idx][0]} 的通道序号重复，保留前者")
+            continue
+        picked[idx] = (key.upper(), arr)
+    return {picked[i][0]: picked[i][1] for i in sorted(picked)}, notes
+
+
+def _collect_blackbox_channels(mat: Dict[str, np.ndarray]
+                               ) -> Tuple[Dict[str, np.ndarray], List[str]]:
+    """取出含元数据 MAT 的全部波形通道。
+
+    新 schema（>=3）逐个通道保存为 ``CH01`` / ``CH02`` …，必须全部导入；
+    旧 schema（<=2）只有单个 ``signal`` 变量，按单通道 ``CH1`` 处理。
+    两者并存时以 ``CHxx`` 为准——那才是当前导出的完整波形。
+    """
+    chans, notes = _collect_scope_channels(mat)
+
+    legacy = None
+    if _LEGACY_SIGNAL_VAR in mat:
+        try:
+            legacy = np.asarray(mat[_LEGACY_SIGNAL_VAR], dtype=np.float64).ravel()
+        except (TypeError, ValueError):
+            legacy = None
+        if legacy is not None and legacy.size == 0:
+            legacy = None
+
+    if chans:
+        if legacy is not None:
+            first = next(iter(chans.values()))
+            same = (legacy.size == first.size
+                    and np.allclose(legacy, first, equal_nan=True))
+            if not same:
+                notes.append(
+                    "文件同时含 signal 与 CHxx 通道：已按 CHxx 导入全部通道，"
+                    "signal 视为遗留副本，未重复导入")
+        return chans, notes
+
+    if legacy is not None:
+        return {"CH1": legacy}, notes
+
+    raise ValueError("MAT 中未找到波形变量（候选名：signal / CH01 / CH02 …）")
+
+
+def _declared_channel_ids(mat: Dict[str, np.ndarray]) -> List[int]:
+    """读取文件声明的通道编号列表（channel_ids / capture_channel_ids）。"""
+    for key in ("channel_ids", "capture_channel_ids"):
+        if key not in mat:
+            continue
+        try:
+            arr = np.asarray(mat[key]).ravel()
+            ids = [int(float(v)) for v in arr if np.isfinite(float(v))]
+        except (TypeError, ValueError):
+            continue
+        if ids:
+            return ids
+    return []
 
 
 def load_blackbox_mat(path: str, fs_override: Optional[float] = None) -> SignalSet:
     """解析含采集参数元数据的 .mat。"""
     mat = sio.loadmat(path, squeeze_me=False)
 
-    sig, sig_key = _pick_blackbox_waveform(mat)
+    channels, ch_notes = _collect_blackbox_channels(mat)
+    warnings: List[str] = list(ch_notes)
 
     def _scalar(key, default=""):
         if key not in mat:
@@ -280,11 +357,18 @@ def load_blackbox_mat(path: str, fs_override: Optional[float] = None) -> SignalS
         "严重度": _scalar("severity_cn"),
         "转速(rpm)": _scalar("rpm"),
         "采集时间": _scalar("created_at"),
-        "波形变量": sig_key,
+        "通道变量": ", ".join(channels),
         "采样率依据": fs_source,
     }
 
-    warnings: List[str] = []
+    # 通道数自洽性：文件声明的通道数与实际解析到的变量数不一致时，
+    # 说明该文件只写入了部分通道，提示用户以免误判为"设备只接了一路"。
+    declared = _declared_channel_ids(mat)
+    if declared and len(declared) != len(channels):
+        warnings.append(
+            f"文件声明 {len(declared)} 个通道（编号 {', '.join(str(i) for i in declared)}），"
+            f"实际解析到 {len(channels)} 个（{', '.join(channels)}）；"
+            f"该文件可能只写入了部分通道")
 
     # 采样率自洽性：有效值与配置值不一致时，频率轴存在同量级的系统偏差。
     # 采集端若已自行给出说明（capture_rate_warning），则以其为准，不再重复提示。
@@ -320,7 +404,7 @@ def load_blackbox_mat(path: str, fs_override: Optional[float] = None) -> SignalS
         path=path,
         name=os.path.basename(path),
         source_type="blackbox_mat",
-        channels={"CH1": sig},
+        channels=channels,
         fs=fs,
         fs_locked=fs_locked,
         unit=str(_scalar("signal_unit", "V")),
@@ -337,21 +421,36 @@ def load_scope_mat(path: str, fs_override: Optional[float] = None) -> SignalSet:
     """解析仅含通道变量的 .mat。"""
     mat = sio.loadmat(path, squeeze_me=False)
 
-    chans: Dict[str, np.ndarray] = {}
-    for key in mat:
-        if key.startswith("__"):
-            continue
-        if _SCOPE_CH.match(key):
-            chans[key.upper()] = np.asarray(mat[key], dtype=np.float64).ravel()
-
+    chans, ch_notes = _collect_scope_channels(mat)
     if not chans:
         raise ValueError("MAT 中未找到 CHxx 通道变量")
 
-    # 文件内无采样率字段，默认 20000 Hz（与采集链路一致）
-    fs = float(fs_override) if fs_override else 20000.0
-    warnings = [] if fs_override else [
-        "该 MAT 不含采样率字段，已按默认 20000 Hz 处理，请在右侧面板手动确认真实采样率"
-    ]
+    # 采样率：优先手动指定；其次读文件自带的标量字段（不同导出器命名不一）；
+    # 都没有才退回默认 20000 Hz。自动识别值不锁定，允许用户按已知频率源修正。
+    warnings: List[str] = list(ch_notes)
+    auto = None
+    if not fs_override:
+        for key in ("fs", "sample_rate_hz", "sampling_rate", "SamplingRate"):
+            if key not in mat:
+                continue
+            try:
+                v = float(np.asarray(mat[key]).ravel()[0])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if np.isfinite(v) and 10.0 <= v <= 2e6:
+                auto = (v, key)
+                break
+
+    if fs_override:
+        fs = float(fs_override)
+    elif auto is not None:
+        fs = auto[0]
+        warnings.append(f"采样率取自文件字段 {auto[1]}（{fs:g} Hz）；"
+                        f"如与实际不符，可直接在右侧面板修改")
+    else:
+        fs = 20000.0
+        warnings.append("该 MAT 不含采样率字段，已按默认 20000 Hz 处理，"
+                        "请在右侧面板手动确认真实采样率")
 
     return SignalSet(
         path=path,

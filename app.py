@@ -1958,13 +1958,16 @@ def _selftest() -> int:
 
             # MAT 格式判别回归：schema>=3 起波形变量名为 CH01，与纯通道 MAT 同名，
             # 类型判别必须依据 capture_* 元数据字段，且采样率取有效值而非默认 20000。
+            # 同一文件可能含多个通道（CH01/CH02 …），必须全部导入。
             bb_path = os.path.join(tmpd, "selftest_blackbox.mat")
             eff_fs, cfg_fs = 31039.0, 31580.0
             savemat(bb_path, {
                 "CH01": sig.reshape(-1, 1).astype("float32"),
+                "CH02": (0.25 * sig).reshape(-1, 1).astype("float32"),
                 "capture_fs": np.array([[cfg_fs]]),
                 "capture_effective_fs": np.array([[eff_fs]]),
                 "capture_rate_warning": "有效采样率 31039.0 Hz 与配置 31580 Hz 偏差 1.71%",
+                "channel_ids": np.array([[1, 2]], dtype="int32"),
                 "rpm": np.array([[1480.0]]),
                 "signal_unit": "V",
             })
@@ -1972,9 +1975,15 @@ def _selftest() -> int:
             rec("MAT（含元数据）格式判别", bb_type == "blackbox_mat", bb_type)
             bb = loader.load_any(bb_path)
             rec("MAT 采样率取有效值", abs(bb.fs - eff_fs) < 1e-6, f"fs={bb.fs:g}")
+            rec("MAT 多通道全部导入",
+                set(bb.channels) == {"CH01", "CH02"} and bb.n_samples == N,
+                f"ch={list(bb.channels)} n={bb.n_samples}")
+            rec("MAT 第二通道波形正确",
+                "CH02" in bb.channels
+                and np.allclose(bb.channels["CH02"], 0.25 * sig, atol=1e-5),
+                "CH02 = 0.25 x CH01")
             rec("MAT 波形与工况解析",
-                "CH1" in bb.channels and bb.n_samples == N
-                and bb.meta.get("转速(rpm)") == "1480.0",
+                bb.n_samples == N and bb.meta.get("转速(rpm)") == "1480.0",
                 f"ch={list(bb.channels)} n={bb.n_samples}")
             rec("MAT 采样率偏差提示", any("1.71" in x for x in bb.warnings),
                 f"{len(bb.warnings)} 条提示")
@@ -1982,6 +1991,18 @@ def _selftest() -> int:
                 f"fs_locked={bb.fs_locked}")
             rec("MAT（无元数据）未被误判", loader.sniff_type(p) == "scope_mat",
                 loader.sniff_type(p))
+
+            # 只导出部分通道时，通道名须保留文件中的真实编号（不能改写成 CH1）
+            bb3_path = os.path.join(tmpd, "selftest_blackbox_ch2only.mat")
+            savemat(bb3_path, {
+                "CH02": sig.reshape(-1, 1).astype("float32"),
+                "capture_fs": np.array([[25600.0]]),
+                "channel_ids": np.array([[2]], dtype="int32"),
+            })
+            bb3 = loader.load_any(bb3_path)
+            rec("MAT 仅含 CH02 时保留真实编号",
+                list(bb3.channels) == ["CH02"] and bb3.n_samples == N,
+                f"ch={list(bb3.channels)}")
 
             # 采样率自洽的 MAT 文件应保持锁定，避免误改
             bb2_path = os.path.join(tmpd, "selftest_blackbox_ok.mat")
