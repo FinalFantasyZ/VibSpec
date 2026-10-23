@@ -130,13 +130,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------------- 拖拽导入 ----------------
 
-    DATA_EXT = (".csv", ".mat")
+    DATA_EXT = (".csv",) + tuple(loader.MAT_CONTAINER_EXTS)
 
     def _paths_from_mime(self, mime) -> List[str]:
         """从拖拽的 MIME 数据里取出可导入的文件路径。
 
         - 拖入**文件夹**会自动递归展开（复用 loader.list_data_files）。
-        - 只接受 .csv / .mat（大小写不敏感），其余忽略。
+        - 只接受 .csv / .mat（以及 v7.3 常见的 .h5/.hdf5 别名），大小写不敏感，
+          其余忽略。
         """
         if not mime.hasUrls():
             return []
@@ -876,7 +877,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_import_files(self):
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self, "选择数据文件", "",
-            "数据文件 (*.csv *.mat *.MAT);;CSV (*.csv);;MAT (*.mat *.MAT);;所有文件 (*)")
+            "数据文件 (*.csv *.mat *.MAT *.h5 *.hdf5);;"
+            "CSV (*.csv);;MAT (*.mat *.MAT);;"
+            "MAT v7.3 / HDF5 (*.mat *.h5 *.hdf5);;所有文件 (*)")
         if paths:
             self._add_paths(paths)
 
@@ -1837,6 +1840,61 @@ def _install_crash_log():
     sys.excepthook = _hook
 
 
+def _write_v5_with_broken_fft(path: str, channels: dict) -> None:
+    """生成一个「含坏 FFT 变量的 v5 文件」，用于自检容错读取。
+
+    scipy 的 ``savemat`` 只会写出合法的压缩数据，无法复现"坏变量"，
+    故这里按 MATLAB v5 的元素描述符手工拼装——结构与实测的示波器导出文件
+    同形：正常的数值矩阵 + 一个 miCOMPRESSED 但内部不是 deflate 流的变量。
+    """
+    import struct
+    import zlib
+
+    def elem(dtype, payload):
+        pad = b"\x00" * ((8 - len(payload) % 8) % 8)
+        return struct.pack("<II", dtype, len(payload)) + payload + pad
+
+    def matrix(name, arr, compress=False, corrupt=False):
+        arr = np.asarray(arr)
+        dims = struct.pack("<" + "i" * arr.ndim, *arr.shape)
+        type_code = {np.dtype("f4"): 7, np.dtype("f8"): 9}[arr.dtype]
+        payload = (elem(6, struct.pack("<II", 6, 0))       # 数组标志
+                   + elem(5, dims)                         # 维度
+                   + elem(1, name.encode("ascii"))         # 变量名
+                   + elem(type_code, arr.tobytes(order="F")))
+        if not compress:
+            return elem(14, payload)
+        blob = zlib.compress(elem(14, payload))
+        if corrupt:
+            mid = len(blob) // 2
+            blob = blob[:mid] + b"\x00\xff" * 8 + blob[mid + 16:]
+        return elem(15, blob)
+
+    header = (b"MATLAB 5.0 MAT-file, Platform: VibSpec, File Version 1.00, "
+              b"Created on: selftest")
+    header = header + b" " * (116 - len(header)) + b"\x00" * 8 + b"\x00\x01IM"
+    body = b"".join(matrix(name, arr) for name, arr in channels.items())
+    body += matrix("FFT01", np.zeros((501, 1), dtype="f4"),
+                   compress=True, corrupt=True)
+    with open(path, "wb") as fh:
+        fh.write(header + body)
+
+
+def _write_hdf5_mat(path: str, datasets: dict) -> None:
+    """生成 MATLAB v7.3 风格的 HDF5 文件（含 MATLAB_class 与 #refs#）。"""
+    import h5py
+
+    with h5py.File(path, "w", userblock_size=512) as fh:
+        for name, arr in datasets.items():
+            ds = fh.create_dataset(name, data=arr)
+            if np.asarray(arr).dtype.kind == "f":
+                ds.attrs["MATLAB_class"] = np.bytes_(
+                    b"single" if np.asarray(arr).dtype == np.float32 else b"double")
+            elif np.asarray(arr).dtype.kind in "iu":
+                ds.attrs["MATLAB_class"] = np.bytes_(b"char")
+        fh.create_group("#refs#")
+
+
 def _selftest() -> int:
     """内置自检：不弹出窗口，执行一次核心功能检查，结果写入 VibSpec_selftest.log。
 
@@ -2015,6 +2073,56 @@ def _selftest() -> int:
             rec("MAT 采样率自洽时保持锁定",
                 bb2.fs_locked is True and abs(bb2.fs - 25600.0) < 1e-6,
                 f"fs={bb2.fs:g} locked={bb2.fs_locked}")
+
+            # ---- MAT 读取兼容性回归（2026-08 扩充）----
+            # 1) 含坏变量的 v5 文件：旧版整份报 "could not read bytes"，
+            #    现在必须跳坏变量、保波形。用 scipy 自己写不出坏文件，
+            #    故此处按 v5 元素结构手工构造（与实测 DL950 文件同形）。
+            broken_path = os.path.join(tmpd, "selftest_broken_fft.mat")
+            _write_v5_with_broken_fft(broken_path, {
+                "CH01": sig.reshape(-1, 1).astype("float32"),
+                "CH02": (0.5 * sig).reshape(-1, 1).astype("float32"),
+            })
+            broken = loader.load_any(broken_path)
+            rec("MAT 坏变量不再拖垮整份文件",
+                list(broken.channels) == ["CH01", "CH02"] and broken.n_samples == N,
+                f"ch={list(broken.channels)} N={broken.n_samples}")
+            rec("MAT 坏变量在提示中如实说明",
+                any("无法解析" in w for w in broken.warnings),
+                f"{len(broken.warnings)} 条提示")
+
+            # 2) v7.3 / HDF5 容器：scipy 的 loadmat 完全不支持，必须走 h5py。
+            #    未安装 h5py 时给出可操作提示，而不是抛 OSError。
+            try:
+                import h5py  # noqa: F401
+                v73_path = os.path.join(tmpd, "selftest_v73.mat")
+                _write_hdf5_mat(v73_path, {
+                    "CH01": np.linspace(-1, 1, N, dtype="float32").reshape(1, N),
+                    "CH02": np.linspace(1, -1, N, dtype="float32").reshape(1, N),
+                    "capture_fs": np.array([[51200.0]]),
+                    "label_cn": np.array([[ord(c) for c in "外圈点蚀"]],
+                                         dtype="uint16"),
+                })
+                v73 = loader.load_any(v73_path)
+                rec("MAT v7.3 可读且多通道全部导入",
+                    set(v73.channels) == {"CH01", "CH02"}, f"ch={list(v73.channels)}")
+                rec("MAT v7.3 采样率与中文标签正确",
+                    abs(v73.fs - 51200.0) < 1e-6 and v73.meta.get("工况") == "外圈点蚀",
+                    f"fs={v73.fs:g} 工况={v73.meta.get('工况')!r}")
+                rec("MAT v7.3 容器类型被记录",
+                    v73.meta.get("MAT 容器") == "v7.3", str(v73.meta.get("MAT 容器")))
+            except ImportError:
+                rec("MAT v7.3 可读（未安装 h5py，跳过）", True, "需 pip install h5py")
+
+            # 3) 坏文件要给出"格式/空文件"这类可读原因，
+            #    不能是"未找到 CHxx 通道变量"这种与真实原因无关的报错。
+            empty_path = os.path.join(tmpd, "selftest_empty.mat")
+            open(empty_path, "wb").close()
+            try:
+                loader.load_any(empty_path)
+                rec("空 MAT 给出可读失败原因", False, "未抛异常")
+            except Exception as exc:                # noqa: BLE001
+                rec("空 MAT 给出可读失败原因", "空" in str(exc), str(exc)[:40])
         except Exception as e:
             rec("自检过程异常", False, traceback.format_exc())
         finally:

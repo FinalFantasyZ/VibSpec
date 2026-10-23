@@ -11,7 +11,7 @@ PyInstaller 收集 scipy 子模块时会触发 scipy._lib.array_api_compat 的�
 仍建议按下面的方式建立干净的构建环境。
 
     set PY=<构建环境路径>\\Scripts\\python.exe
-    "%PY%" -m pip install PyQt5 numpy scipy matplotlib pyinstaller EMD-signal
+    "%PY%" -m pip install PyQt5 numpy scipy matplotlib h5py pyinstaller EMD-signal
     "%PY%" build_exe.py
 
 产物：
@@ -110,11 +110,26 @@ def check_deps():
         print("[信息] 检测到 PyEMD：EMD 处理链将一并打包。")
     except ImportError:
         print("[信息] 未检测到 PyEMD：exe 中选择 EMD 方式时将提示安装依赖（其他功能不受影响）。")
+    try:
+        import h5py  # noqa: F401
+        print("[信息] 检测到 h5py：MAT v7.3 / HDF5 格式将一并支持。")
+    except ImportError:
+        print("[信息] 未检测到 h5py：exe 将无法读取 MAT v7.3 / HDF5 文件"
+              "（v4/v5 不受影响）。如需支持请先 pip install h5py 再打包。")
 
 
 def has_emd():
     try:
         import PyEMD  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def has_h5py():
+    """打包环境是否装了 h5py；装了才收集其子模块，否则略过以免打包失败。"""
+    try:
+        import h5py  # noqa: F401
         return True
     except ImportError:
         return False
@@ -141,6 +156,7 @@ def build(onedir=False):
         "--specpath", HERE,
         # 显式声明项目自带的本地模块，避免 PyInstaller 静态分析遗漏
         "--hidden-import", "loader",
+        "--hidden-import", "mat_reader",     # MAT 容器读取后端（v4/v5/v7.3/HDF5）
         "--hidden-import", "analysis",
         "--hidden-import", "i18n",
         "--hidden-import", "qt_localize",
@@ -191,6 +207,9 @@ def build(onedir=False):
     ]
     if has_emd():
         args += ["--collect-submodules", "PyEMD"]
+    if has_h5py():
+        # h5py 的读取后端为运行时动态导入，静态分析无法完整识别
+        args += ["--collect-submodules", "h5py"]
     args.append(ENTRY)
 
     print("=" * 72)

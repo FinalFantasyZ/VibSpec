@@ -43,7 +43,8 @@
 python "<项目目录>\app.py"
 ```
 
-依赖：`PyQt5`、`numpy`、`scipy`、`matplotlib`。
+依赖：`PyQt5`、`numpy`、`scipy`、`matplotlib`；
+建议加装 `h5py`（读取 MATLAB v7.3 / HDF5 格式的 MAT 需要，缺失时该格式会给出提示）。
 注意：若使用 conda 多环境，请确认所选环境已安装 Qt（`v_python` 环境通常未安装）。
 
 可选依赖 `EMD-signal` 仅影响「EMD 第1个IMF」这一条处理链，未安装不影响其他功能。
@@ -62,13 +63,75 @@ python "<项目目录>\app.py"
 |---|---|---|
 | **CSV** | 3 行文件头 + 数据行 | 首行给出采样率与通道数，另两行给出量程与显示基线；支持多通道 |
 | **MAT（含元数据）** | 波形变量 + `capture_*` 元数据 | 采样率等采集参数随文件一并保存；波形变量为 `signal`（旧）或 `CH01`/`CH02`/…（新，**支持多通道**） |
-| **MAT（纯通道）** | 仅 `CHxx` 通道变量 | 文件内不含采样率字段，需人工指定 |
+| **MAT（纯通道）** | 仅通道变量 | 文件内不含采样率字段，需人工指定 |
 
 > **判别说明（2026-10-08 修正）**：较新的导出把波形变量由 `signal` 改名为 `CH01`，
 > 与「纯通道 MAT」的通道名同形，因此**不能只靠波形变量名区分二者**。
 > 现按元数据字段判别：含 `capture_*` / `history_payload_json` 者按「含元数据」解析，
-> 其余含 `CHxx` 者按「纯通道」解析。此前版本会把前一类误判为后一类，
+> 其余含通道变量者按「纯通道」解析。此前版本会把前一类误判为后一类，
 > 采样率被置为默认 20000 Hz，导致频率轴整体压缩（详见第五章第 3 条）。
+
+### MAT 兼容性（2026-08 扩展）
+
+MAT 只是一种「容器」，各家仪器与 MATLAB 版本的写法差异极大。读取层已与
+「数据来源」解耦为独立模块 `mat_reader.py`，按容器分别处理：
+
+| 容器 | 说明 | 读取方式 |
+|---|---|---|
+| **MATLAB v4** | 极老的 `MATLAB 4.0` 文件头 | scipy |
+| **MATLAB v5** | 128 字节文件头 + 元素描述符（最常见） | scipy，**逐变量容错 + 结构级扫描兜底** |
+| **MATLAB v7.3** | 实际是 HDF5 容器（`save(..., '-v7.3')`） | h5py（scipy **不支持**） |
+| **原生 HDF5** | `.mat` / `.h5` / `.hdf5`，无 MATLAB 属性 | h5py |
+
+识别依据是**文件头字节**，与扩展名无关，所以改名也不会读错：
+
+- `MATLAB 5.0 MAT-file` → v5；
+- 偏移 0/512/1024/2048 处出现 `\x89HDF\r\n\x1a\n` → HDF5（v7.3）。
+
+**单个坏变量不再拖垮整份文件（本次关键修复）**。实测 `TEST_DIESEL_0015.MAT`
+（DL950 示波器导出）中，`FFT01` 被写成 `miCOMPRESSED` 元素，但其内部**并不是
+合法的 deflate 流**。旧版直接调用 `scipy.io.loadmat`，读到该变量立刻抛
+`OSError: could not read bytes`，整份文件（包括完好的 `CH02` 波形）全部读不出来。
+现在的读取顺序是：
+
+1. `loadmat` 整体读（最快）；
+2. 失败 → **扫描顶层目录、按变量切片逐块交给 scipy**，坏变量单独跳过，
+   其余变量照常导入，并在文件信息里列出被跳过的变量名；
+3. 仍失败 → **结构级扫描器**（直接解析元素描述符）兜底，
+   应对截断、描述符异常、缺少结尾的文件，能救多少救多少。
+
+### 通道命名（多通道）
+
+带编号的变量按编号升序全部导入，**保留文件中的原始写法**
+（`CH01` / `CH02` …），因为编号本身对应实际接线：
+
+| 写法 | 示例 |
+|---|---|
+| 本软件导出 | `CH01`、`CH02`、`signal`（旧 schema） |
+| 示波器/通用 | `CH1`、`CH_2`、`Chan3`、`Channel_4`、`AI5`、`AIN06` |
+| 无编号单路 | `Waveform`、`Trace`、`Data`、`X`、`Signal` …（按出现顺序编号） |
+| 结构体 / HDF5 组 | `data.CH01`、`/data/CH02`（展平为 `data_CH01` 后匹配） |
+
+以下变量**不会**被误当成通道（实测踩过的坑）：
+
+- `fs` / `rpm` / `label_cn` / `n_samples` 等标量元数据；
+- `time` / `t` 等时间轴——此外还按「单调、等间距、从 0 起」的数据特征
+  排除无编号变量中的时间列；
+- N×M（两维都大于 1）的列式表格不擅自拆分成 M 个通道，
+  避免把时间列画成一条曲线；只有结构体里「时间列 + 单信号列」这种
+  紧凑写法才会按列拆分。
+
+多通道**等长性**：各通道点数不一致时全部照常导入，并在提示中说明
+软件将按最短通道对齐显示（`SignalSet.n_samples` 取最小值）。
+
+**采样率字段**按以下顺序取（前几项为不同导出版本的等价写法）：
+`capture_effective_fs` → `capture_fs` → `capture_sample_rate` → `effective_fs`
+→ `sample_rate_hz` → `sampling_rate` → `Samplerate` → `SamplingRate`
+→ `sampling_frequency` → `fs_hz` → `configured_fs` → `fs` → `Fs` → `FS`。
+
+> 依赖提示：读取 v7.3 / HDF5 需要 `h5py`（`pip install h5py`）。
+> 未安装时软件会明确提示该文件需要 h5py，而不是抛出底层 `OSError`。
+> 打包 `VibSpec.exe` 时会一并打包（若构建环境已安装）。
 
 ### 各格式细节
 
@@ -104,11 +167,14 @@ python "<项目目录>\app.py"
   软件的时域指标已把直流分离出去，RMS 只统计交流成分（详见下文）。
 
 #### 3. MAT（纯通道）
-- 变量名形如 `CH03`、`CH04`，各 **20001×1** float32，单位 V。
-- 若文件自带 `fs` / `sample_rate_hz` / `sampling_rate` 标量字段，软件会**自动采用**
-  并在信息面板标明来源（该值不锁定，可手动更正）。
+- 变量名形如 `CH03`、`CH04`（也支持 `Chan3` / `Channel_4` / `AI5` / `Waveform` 等写法），
+  各 **20001×1** float32，单位 V。
+- 若文件自带 `fs` / `sample_rate_hz` / `sampling_rate` / `SamplingRate` 等标量字段，
+  软件会**自动采用**并在信息面板标明来源（该值不锁定，可手动更正）。
 - 文件内确实不含采样率字段时，默认按 20000 Hz 处理，并在状态栏给出提示。
   请依据实际采集设置，在右侧「采样率 fs」框中手动更正——改完点「绘制/刷新」即可。
+- 文件信息面板会显示「MAT 容器」一行（`v4` / `v5` / `v7.3` / `hdf5`），
+  便于判断该文件由哪种导出方式产生。
 
 ---
 
@@ -462,6 +528,17 @@ python "<项目目录>\app.py"
 
 5. **直流偏置不是故障特征。** 它来自传感器零点，看频谱前已去均值。
 
+6. **「could not read bytes」曾让整份文件打不开（2026-08 已修复）。**
+   该报错来自 `scipy.io.loadmat`，并非文件真的不可读：示波器把某个变量
+   （实测为 `FFT01`）写成压缩元素，但内部数据不是合法的 deflate 流，
+   scipy 读到它便整体抛错，同一文件里完好的波形也跟着丢掉。
+   现在改为逐变量容错读取，坏变量单独跳过并在文件信息里列出名字，
+   其余通道照常导入。**遇到此类文件不必再用 MATLAB 另存，直接拖进来即可。**
+
+7. **v7.3 的 MAT 需要 h5py。** 这类文件本质是 HDF5（`save(..., '-v7.3')`），
+   scipy 完全不支持。未安装 h5py 时软件会提示安装方法，或建议在 MATLAB 侧
+   另存为 v5（`save(..., '-v7')`）。
+
 
 ---
 
@@ -470,7 +547,8 @@ python "<项目目录>\app.py"
 | 文件 | 作用 |
 |---|---|
 | `app.py` | PyQt5 主界面（绘图、导入导出、拖拽、删除、参数面板、信号预处理链） |
-| `loader.py` | 三种格式的解析器，统一输出 `SignalSet` |
+| `loader.py` | 格式判别与「变量 → 通道/采样率/工况」的解释，统一输出 `SignalSet` |
+| `mat_reader.py` | MAT 容器读取后端：v4 / v5 / v7.3 / HDF5，含坏变量与截断文件的容错恢复 |
 | `i18n.py` | 中英文文案对照表与运行时语言切换；「关于」信息与项目主页地址 |
 | `qt_localize.py` | matplotlib 内置对话框（图形参数 / 子图调整）中文化，并移除无效的「?」按钮 |
 | `analysis.py` | 分析内核：时域统计、幅值谱、Welch PSD、峰值检索，以及移植的 MATLAB 算法（`fir1_like` / `filter_2s_fir` / `envelope_liao` / `svd_liao` / `envelope_spectrum` / `emd_first_imf`） |
@@ -486,6 +564,7 @@ python "<项目目录>\app.py"
 | `_ui_features_test.py` | 本轮新功能回归（34 项）：拖拽、删除、tooltip、**时间轴**、fs 作用域 |
 | `_i18n_test.py` | 中英文切换、菜单栏、工具栏与 matplotlib 对话框回归（**31 项**） |
 | `_timeline_test.py` | 时域时间轴、两窗口数据长度差异与显示参数自动重绘回归（**14 项**） |
+| `_mat_test.py` | MAT 兼容性与多通道回归（**38 项**）：坏变量容错、v7.3/HDF5、通道命名变体、坏文件报错 |
 | `_shot_new.png` | 真实平台渲染的最新界面截图，用于人眼确认 |
 
 ---
@@ -501,7 +580,7 @@ python "<项目目录>\app.py"
 
 ```bat
 python -m venv .venv-build
-.venv-build\Scripts\python.exe -m pip install PyQt5 numpy scipy matplotlib pyinstaller EMD-signal
+.venv-build\Scripts\python.exe -m pip install PyQt5 numpy scipy matplotlib h5py pyinstaller EMD-signal
 .venv-build\Scripts\python.exe build_exe.py
 ```
 
