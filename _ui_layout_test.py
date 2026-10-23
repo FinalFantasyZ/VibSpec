@@ -14,7 +14,7 @@ import numpy as np
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, r"D:\Desktop\VibSpec")
 
-from PyQt5 import QtWidgets, QtCore  # noqa: E402
+from PyQt5 import QtWidgets, QtCore, QtGui  # noqa: E402
 import app as appmod  # noqa: E402
 
 FAIL = 0
@@ -122,6 +122,46 @@ if sa is not None:
     check("内容超高时有滚动条可用", True,
           f"内容高={inner.sizeHint().height()} 视口高={sa.viewport().height()} "
           f"(可滚动={'是' if inner.sizeHint().height() > sa.viewport().height() else '否，刚好放下'})")
+
+print()
+print("=" * 72)
+print("3b. 滚轮不会误改参数（数值框 / 下拉框）")
+print("=" * 72)
+
+
+def send_wheel(widget, delta=120):
+    pos = QtCore.QPointF(widget.width() / 2, widget.height() / 2)
+    gp = QtCore.QPointF(widget.mapToGlobal(widget.rect().center()))
+    ev = QtGui.QWheelEvent(pos, gp, QtCore.QPoint(0, 0), QtCore.QPoint(0, -delta),
+                           QtCore.Qt.NoButton, QtCore.Qt.NoModifier,
+                           QtCore.Qt.NoScrollPhase, False)
+    qapp.sendEvent(widget, ev)
+    qapp.processEvents()
+    return ev
+
+
+for name in ("spin_fs", "spin_nperseg", "spin_nfft", "spin_t0",
+             "spin_fmax", "spin_ylim", "spin_tspan"):
+    s = getattr(w, name)
+    before = s.value()
+    send_wheel(s)
+    check(f"滚轮不改数值 {name}", s.value() == before, f"{before} -> {s.value()}")
+
+for name in ("cmb_window", "cmb_overlap", "cmb_norm"):
+    c = getattr(w, name)
+    before = c.currentIndex()
+    send_wheel(c)
+    check(f"滚轮不换选项 {name}", c.currentIndex() == before,
+          f"index {before} -> {c.currentIndex()}")
+
+# 滚轮划过控件时，面板本身仍应能滚动（否则会变成"划到控件就滚不动"）
+if sa is not None and sa.verticalScrollBar().maximum() > 0:
+    bar = sa.verticalScrollBar()
+    bar.setValue(0)
+    qapp.processEvents()
+    send_wheel(w.spin_fs)
+    check("滚轮划过控件时面板仍能滚动", bar.value() > 0,
+          f"滚动位置 {bar.value()}")
 
 print()
 print("=" * 72)

@@ -53,6 +53,57 @@ MATLAB_COLORS = [
 
 
 # ----------------------------------------------------------------------------
+# 参数面板的输入控件（禁止滚轮误触）
+# ----------------------------------------------------------------------------
+
+class _WheelPassthrough:
+    """把滚轮事件交给外层滚动区处理，而不是改变自身数值。
+
+    背景：参数面板整体位于 QScrollArea 内，鼠标划过「采样率 fs」「窗函数」
+    「PSD 分段」等控件时，滚轮本意是**滚动面板**，却常被控件截获——
+    数值框会跳几十/几百 Hz、下拉框会直接换选项，而这些参数又会立刻触发重绘，
+    用户往往察觉不到自己改了什么。
+
+    做法分两步：
+    1. 控件自己不消费滚轮 —— 数值/选项保持不变；
+    2. **主动转发**给外层 QScrollArea 的 viewport。
+
+    第 2 步是必须的：实测只做第 1 步时，面板会出现「滚轮划到控件上就完全
+    滚不动」的新问题——Qt 不会把被 ignore 的滚轮事件继续递给滚动区。
+    因此这里显式把同一事件投递给滚动区，使滚动行为与划过空白区域一致。
+    """
+
+    def wheelEvent(self, event):                   # noqa: N802 —— Qt 命名
+        scroller = _wheel_scroller(self)
+        if scroller is not None:
+            # 同一事件对象直接投递给滚动区的 viewport，由它按同样的距离滚动
+            QtWidgets.QApplication.sendEvent(scroller.viewport(), event)
+        event.ignore()
+
+
+def _wheel_scroller(widget):
+    """向上查找最近的 QScrollArea（参数面板的滚动容器）。"""
+    parent = widget.parentWidget()
+    while parent is not None:
+        if isinstance(parent, QtWidgets.QScrollArea):
+            return parent
+        parent = parent.parentWidget()
+    return None
+
+
+class NoWheelDoubleSpinBox(_WheelPassthrough, QtWidgets.QDoubleSpinBox):
+    """禁用滚轮调值的浮点数值框（仍可用键盘、上下箭头、直接输入修改）。"""
+
+
+class NoWheelSpinBox(_WheelPassthrough, QtWidgets.QSpinBox):
+    """禁用滚轮调值的整数数值框。"""
+
+
+class NoWheelComboBox(_WheelPassthrough, QtWidgets.QComboBox):
+    """禁用滚轮切换选项的下拉框（点击展开、键盘上下键仍可切换）。"""
+
+
+# ----------------------------------------------------------------------------
 # 绘图画布
 # ----------------------------------------------------------------------------
 
@@ -401,7 +452,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "不同采集链路的增益可能相差几十~上千倍，不归一化时小信号会被压成直线。\n"
             "归一化**只影响绘图显示**，导出的图片与 CSV 始终是原始物理量。")
         gn = QtWidgets.QVBoxLayout(gb_n)
-        self.cmb_norm = QtWidgets.QComboBox()
+        self.cmb_norm = NoWheelComboBox()
         self.cmb_norm.addItems([
             "不归一化（原始物理量）",
             "除以各自 RMS（按有效值归一）",
@@ -438,7 +489,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lab_pp = QtWidgets.QLabel("方式")
         lab_pp.setToolTip("选择包络分析的前置处理方式，见下拉框各项说明。")
         row_pp.addWidget(lab_pp)
-        self.cmb_pp = QtWidgets.QComboBox()
+        self.cmb_pp = NoWheelComboBox()
         self.cmb_pp.addItems([
             "高通滤波",
             "SVD 重构",
@@ -460,7 +511,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lab_f = QtWidgets.QLabel("FIR 截止")
         lab_f.setToolTip("高通滤波器把该频率以下的成分滤掉。")
         row_f.addWidget(lab_f)
-        self.spin_pp_fc = QtWidgets.QDoubleSpinBox()
+        self.spin_pp_fc = NoWheelDoubleSpinBox()
         self.spin_pp_fc.setRange(1, 1_000_000)
         self.spin_pp_fc.setDecimals(1)
         self.spin_pp_fc.setValue(500.0)
@@ -477,7 +528,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lab_n = QtWidgets.QLabel("FIR 阶数")
         lab_n.setToolTip("滤波器阶数越大，过渡带越窄但边界效应也越长。")
         row_n.addWidget(lab_n)
-        self.spin_pp_n = QtWidgets.QSpinBox()
+        self.spin_pp_n = NoWheelSpinBox()
         self.spin_pp_n.setRange(4, 4000)
         self.spin_pp_n.setValue(180)
         self.spin_pp_n.setToolTip(
@@ -501,7 +552,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "横轴为 0 ~ fs 的完整谱，纵轴为幅值。")
         gpp.addWidget(lab_env)
         row_lfr = QtWidgets.QHBoxLayout()
-        self.spin_pp_num = QtWidgets.QSpinBox()
+        self.spin_pp_num = NoWheelSpinBox()
         self.spin_pp_num.setRange(0, 1 << 22)
         self.spin_pp_num.setValue(16384)
         self.spin_pp_num.setToolTip(
@@ -511,7 +562,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lab_num.setToolTip(self.spin_pp_num.toolTip())
         row_lfr.addWidget(lab_num)
         row_lfr.addWidget(self.spin_pp_num, 1)
-        self.spin_pp_lfr = QtWidgets.QSpinBox()
+        self.spin_pp_lfr = NoWheelSpinBox()
         self.spin_pp_lfr.setRange(0, 1 << 22)
         self.spin_pp_lfr.setValue(800)
         self.spin_pp_lfr.setToolTip(
@@ -546,7 +597,7 @@ class MainWindow(QtWidgets.QMainWindow):
         gp.setContentsMargins(0, 0, 0, 0)
         gp.setSpacing(4)
 
-        self.spin_fs = QtWidgets.QDoubleSpinBox()
+        self.spin_fs = NoWheelDoubleSpinBox()
         self.spin_fs.setRange(1, 10_000_000)
         self.spin_fs.setDecimals(3)
         self.spin_fs.setValue(20000)
@@ -560,7 +611,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "   只会改选中的文件，不会影响其它文件。")
         gp.addRow("采样率 fs", self.spin_fs)
 
-        self.cmb_window = QtWidgets.QComboBox()
+        self.cmb_window = NoWheelComboBox()
         self.cmb_window.addItems(list(analysis.WINDOWS.keys()))
         self.cmb_window.setCurrentText("汉宁 (hann)")
         self.cmb_window.setToolTip(
@@ -571,7 +622,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "• 汉明/布莱克曼：旁瓣更低，代价是主瓣更宽。")
         gp.addRow("窗函数", self.cmb_window)
 
-        self.spin_nperseg = QtWidgets.QSpinBox()
+        self.spin_nperseg = NoWheelSpinBox()
         self.spin_nperseg.setRange(0, 1 << 20)
         self.spin_nperseg.setValue(4096)
         self.spin_nperseg.setToolTip(
@@ -580,7 +631,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "分段越长 → 分辨率越高，但方差增大（谱线起伏更明显）。")
         gp.addRow("PSD 分段 nperseg", self.spin_nperseg)
 
-        self.spin_nfft = QtWidgets.QSpinBox()
+        self.spin_nfft = NoWheelSpinBox()
         self.spin_nfft.setRange(0, 1 << 21)
         self.spin_nfft.setValue(0)
         self.spin_nfft.setToolTip(
@@ -589,7 +640,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "但不会真正提高频率分辨率。")
         gp.addRow("FFT 点数 nfft", self.spin_nfft)
 
-        self.cmb_overlap = QtWidgets.QComboBox()
+        self.cmb_overlap = NoWheelComboBox()
         self.cmb_overlap.addItems(["0", "25", "50", "75"])
         self.cmb_overlap.setCurrentText("50")
         self.cmb_overlap.setToolTip(
@@ -597,7 +648,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "交叠越大，参与平均的段数越多、谱越平滑，但计算量越大。")
         gp.addRow("PSD 重叠 %", self.cmb_overlap)
 
-        self.spin_t0 = QtWidgets.QDoubleSpinBox()
+        self.spin_t0 = NoWheelDoubleSpinBox()
         self.spin_t0.setRange(0, 1e9)
         self.spin_t0.setDecimals(4)
         self.spin_t0.setValue(0.0)
@@ -607,7 +658,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "用于跳过开头的过渡段或冲击段。0 表示从起点开始。")
         gp.addRow("时域起点 t0", self.spin_t0)
 
-        self.spin_tspan = QtWidgets.QDoubleSpinBox()
+        self.spin_tspan = NoWheelDoubleSpinBox()
         self.spin_tspan.setRange(0, 1e9)
         self.spin_tspan.setDecimals(4)
         self.spin_tspan.setValue(0.05)
@@ -617,7 +668,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "填 0 表示显示全程。")
         gp.addRow("时域时长", self.spin_tspan)
 
-        self.spin_fmax = QtWidgets.QDoubleSpinBox()
+        self.spin_fmax = NoWheelDoubleSpinBox()
         self.spin_fmax.setRange(0, 10_000_000)
         self.spin_fmax.setDecimals(1)
         self.spin_fmax.setValue(0)
@@ -627,7 +678,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "如需放大低频段（观察轴承故障特征频率），填入较小值。")
         gp.addRow("频率上限", self.spin_fmax)
 
-        self.spin_ylim = QtWidgets.QDoubleSpinBox()
+        self.spin_ylim = NoWheelDoubleSpinBox()
         self.spin_ylim.setRange(-300, 0)
         self.spin_ylim.setDecimals(1)
         self.spin_ylim.setValue(-120)
@@ -1895,6 +1946,41 @@ def _write_hdf5_mat(path: str, datasets: dict) -> None:
         fh.create_group("#refs#")
 
 
+def _wheel_ignored(widget, win) -> bool:
+    """自检用：确认滚轮不会改变数值框数值 / 下拉框选项。
+
+    只判断"没变"是不够的——若控件把滚轮吞掉，面板就滚不动了。
+    因此同时要求事件未被接受，且（面板可滚动时）滚动条确实动了。
+    """
+    from PyQt5 import QtGui
+    from PyQt5.QtCore import QPoint, QPointF, Qt as _Qt
+
+    before = (widget.currentIndex() if isinstance(widget, QtWidgets.QComboBox)
+              else widget.value())
+    pos = QPointF(widget.width() / 2, widget.height() / 2)
+    gp = QPointF(widget.mapToGlobal(widget.rect().center()))
+    ev = QtGui.QWheelEvent(pos, gp, QPoint(0, 0), QPoint(0, -120),
+                           _Qt.NoButton, _Qt.NoModifier, _Qt.NoScrollPhase, False)
+    QtWidgets.QApplication.sendEvent(widget, ev)
+
+    after = (widget.currentIndex() if isinstance(widget, QtWidgets.QComboBox)
+             else widget.value())
+    if before != after or ev.isAccepted():
+        return False
+
+    scroller = _wheel_scroller(widget)
+    if scroller is None:
+        return True
+    bar = scroller.verticalScrollBar()
+    if bar.maximum() == 0:                 # 面板无需滚动时无从判断，不因此判失败
+        return True
+    bar.setValue(0)
+    QtWidgets.QApplication.sendEvent(widget, QtGui.QWheelEvent(
+        pos, gp, QPoint(0, 0), QPoint(0, -120), _Qt.NoButton, _Qt.NoModifier,
+        _Qt.NoScrollPhase, False))
+    return bar.value() > 0
+
+
 def _selftest() -> int:
     """内置自检：不弹出窗口，执行一次核心功能检查，结果写入 VibSpec_selftest.log。
 
@@ -1964,6 +2050,10 @@ def _selftest() -> int:
             mime = QMimeData()
             mime.setUrls([QUrl.fromLocalFile(p)])
             rec("拖拽路径解析", w._paths_from_mime(mime) == [os.path.normpath(p)])
+
+            # 参数面板不响应滚轮（防止误触改值）
+            rec("数值框忽略滚轮", _wheel_ignored(w.spin_fs, w), "spin_fs")
+            rec("下拉框忽略滚轮", _wheel_ignored(w.cmb_window, w), "cmb_window")
 
             w.plot_all()
             qapp.processEvents()
